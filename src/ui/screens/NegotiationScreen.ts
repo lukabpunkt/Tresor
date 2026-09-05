@@ -175,8 +175,8 @@ export function createNegotiationScreen(ctx: ScreenContext): ScreenInstance {
        * Rejection, und die steht als Fehler in der Konsole eines Spielers, dem gerade
        * nur das WLAN weggebrochen ist (Audit A5).
        */
-      void import('@/game/StageApp')
-        .then((m) => m.preloadStageAssets())
+      void import('@/game/stageModules')
+        .then((m) => m.preloadStage())
         .catch(() => undefined);
     },
     destroy() {

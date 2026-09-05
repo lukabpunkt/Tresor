@@ -43,7 +43,8 @@ Tresor/
 │  │  ├─ router.ts · components/ (button, badge, choiceCard, vaultWidget, countdownRing, sheet, toast, flipCounter)
 │  │  └─ screens/ (Title, Lobby, Negotiation, Pass, Choice, Sealed, Reveal, Distribute, Result, SettingsSheet, RulesSheet)
 │  ├─ game/                 # PIXI-Bühne
-│  │  ├─ StageApp.ts        # PIXI-Singleton, Resize, Ticker→GSAP
+│  │  ├─ stageModules.ts    # eine Liste aller Zeichen-Module + Vorlauf (ADR-41)
+│  │  ├─ StageApp.ts        # PIXI-Singleton, Resize, Ticker→GSAP, warmStageApp()
 │  │  ├─ VaultRoom.ts       # Wand, Laser, Tresor, Tisch, Spotlight, Vignette, Alarm-Modus
 │  │  │                     # baut und besitzt zugleich die Buehne (Crooks, Karten, Kassel)
 │  │  ├─ layout.ts          # Halbkreis-Layout als reine Funktion (Audit A2 als Unit-Test)
@@ -213,7 +214,15 @@ Tests pro Sequenz: Dauer 2–8 s, keine Exceptions, alle Crooks nach `reset()` w
 ## 8. Screens: DOM vs. Canvas
 
 DOM: Title, Lobby, Negotiation (inkl. Tresor-Widget als SVG/CSS — kein PIXI nötig), Pass, Choice, Sealed, Distribute, Result, Sheets.
-Canvas (PIXI): nur REVEAL. Das PIXI-App-Singleton wird beim ersten REVEAL erzeugt und wiederverwendet; Assets werden während NEGOTIATION per `Assets.backgroundLoad` geladen.
+Canvas (PIXI): nur REVEAL. Das PIXI-App-Singleton wird **während NEGOTIATION/SILENCE** erzeugt und über die ganze Session wiederverwendet — nicht erst beim Betreten der Aufdeckung (ADR-41). Dort kostete `Application.init()` rund 280 ms in einem einzigen Frame, und zwar genau zwischen „Tresor öffnen" und der ersten Karte.
+
+Der Vorlauf läuft über `game/stageModules.ts` in drei Schritten, und die Reihenfolge ist bindend:
+
+1. **Alle Zeichen-Module** (`loadStageModules()`). PIXI bindet `renderer.renderPipes` beim Anlegen des Renderers an die bis dahin registrierten Erweiterungen; jede Zeichen-Klasse registriert ihre Pipe beim Auswerten ihres Moduls. Ein Renderer, der vor `VaultRoom` & Co. entsteht, hat deren Pipes für immer nicht — die Show stirbt im ersten Frame.
+2. **Atlanten** (`loadStageAssets()`), damit Bild-Dekodierung und Shader-Übersetzung nicht um dieselbe CPU konkurrieren.
+3. **Renderer** (`warmStageApp()`), gewärmt an einem Wegwerf-Objekt außerhalb der Bühne — Fläche plus je ein Sprite pro Atlas, womit auch die Texturen hier auf die GPU wandern.
+
+`stageModules.ts` ist die **einzige** Stelle, die diese Module lädt; `RevealScreen` und die Outcome-Vorschau ziehen dieselbe Liste. `tests/unit/boundaries.test.ts` hält das fest.
 
 Das Tresor-Widget existiert damit zweimal (DOM-Version für Negotiation/Result, PIXI-Version für die Bühne). Beide nutzen dieselben SVG-Quellen aus `assets-src/svg/vault/` — die DOM-Version als Inline-SVG mit CSS-Animationen, die PIXI-Version aus dem Atlas. Das ist bewusst: ein PIXI-Canvas im Negotiation-Screen wäre Overkill.
 

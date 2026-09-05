@@ -27,6 +27,7 @@ import { DEFAULT_SETTINGS, type Settings } from '@/config/rules';
 import { vaultFill } from '@/ui/components/vaultWidget';
 import { unlockAudio, play as playCue } from '@/audio/AudioManager';
 import type { OutcomeContext } from '@/game/outcomes/OutcomeSequence';
+import { loadStageModules } from '@/game/stageModules';
 
 const PLAYER_COUNT = 5;
 
@@ -40,15 +41,14 @@ const STEALS: Record<Outcome, boolean[]> = {
 };
 
 export async function mountOutcomePreview(host: HTMLElement): Promise<void> {
-  const [stageApp, roomModule, cameraModule, sequenceModule, registryModule, counterModule] =
-    await Promise.all([
-      import('@/game/StageApp'),
-      import('@/game/VaultRoom'),
-      import('@/game/Camera'),
-      import('@/game/outcomes/OutcomeSequence'),
-      import('@/game/outcomes/registry'),
-      import('@/game/fx/SipCounter'),
-    ]);
+  const {
+    stageApp,
+    room: roomModule,
+    camera: cameraModule,
+    sequence: sequenceModule,
+    registry: registryModule,
+    counter: counterModule,
+  } = await loadStageModules();
 
   registryModule.registerAll();
 

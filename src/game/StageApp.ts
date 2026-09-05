@@ -10,7 +10,7 @@
  * Karte.
  */
 
-import { Application, Assets, Container, type Spritesheet } from 'pixi.js';
+import { Application, Assets, Container, Graphics, Sprite, type Spritesheet } from 'pixi.js';
 /*
  * PIXI erzeugt Shader- und Uniform-Code per `new Function`. Unsere CSP verbietet
  * `unsafe-eval` (Architektur §9), deshalb der eval-freie Pfad — ohne ihn stirbt die
@@ -57,20 +57,12 @@ export function loadStageAssets(): Promise<StageAssets> {
     const sheets = await Promise.all(ATLASES.map((name) => Assets.load<Spritesheet>(atlasUrl(name))));
     assetsReady = true;
     return Object.fromEntries(ATLASES.map((name, index) => [name, sheets[index]!])) as unknown as StageAssets;
-  })();
-  return assetsPromise;
-}
-
-/**
- * Preload im Hintergrund (Architektur §8) — laeuft waehrend NEGOTIATION.
- * Beim Betreten der Aufdeckung darf nichts mehr nachgeladen werden (Audit A2).
- */
-export function preloadStageAssets(): void {
-  void loadStageAssets().catch((error) => {
-    console.warn('[stage] Preload fehlgeschlagen', error);
-    // Beim echten Betreten der Buehne wird erneut versucht.
+  })().catch((error: unknown) => {
+    // Netz weg waehrend des Vorlaufs: Beim Betreten der Buehne wird neu geladen.
     assetsPromise = undefined;
+    throw error;
   });
+  return assetsPromise;
 }
 
 /** True, sobald alle Atlanten im Speicher liegen. */
@@ -108,13 +100,40 @@ export interface StageAppHandle {
 }
 
 let handle: StageAppHandle | undefined;
+let pending: Promise<StageAppHandle> | undefined;
 
-/** Erzeugt die App beim ersten Aufruf und gibt danach immer dieselbe Instanz zurueck. */
-export async function getStageApp(): Promise<StageAppHandle> {
-  if (handle) return handle;
+/**
+ * Erzeugt die App beim ersten Aufruf und gibt danach immer dieselbe Instanz zurueck.
+ *
+ * Die Sperre liegt auf der **Promise**, nicht auf dem fertigen Handle: `app.init()`
+ * dauert auf einem Mittelklasse-Handy rund 280 ms, und in dieser Zeit ruft der Vorlauf
+ * waehrend der Verhandlung und die Aufdeckung selbst beide hier herein. Eine Pruefung
+ * nur auf `handle` liesse beide durch — zwei WebGL-Kontexte, zwei Ticker, die beide
+ * `gsap.updateRoot()` mit ihrer eigenen Zeit fuettern. Genau daran ist der erste Anlauf
+ * auf den Vorlauf gestorben (ADR-40 → ADR-41).
+ */
+export function getStageApp(): Promise<StageAppHandle> {
+  if (handle) return Promise.resolve(handle);
+  pending ??= createStageApp().catch((error: unknown) => {
+    // Kein WebGL, Speicher voll: Der naechste Versuch soll es neu probieren duerfen.
+    pending = undefined;
+    throw error;
+  });
+  return pending;
+}
 
+async function createStageApp(): Promise<StageAppHandle> {
   const app = new Application();
   await app.init({
+    /*
+     * **Nicht von selbst loslaufen.** PixiJS startet den Ticker sonst noch in `init()`,
+     * und der zeichnet ab da jeden Frame `app.stage` — auch eine Buehne, auf der nichts
+     * steht. Solange die App erst beim Aufdecken entstand, war das folgenlos: Zwischen
+     * `init()` und dem fertigen Raum lag kein einziger Frame. Seit dem Vorlauf liegt
+     * dort die halbe Verhandlung, und das waeren dreissig Sekunden Rendern ins Leere
+     * (ADR-41). Gezeichnet wird ab `attach()`.
+     */
+    autoStart: false,
     backgroundAlpha: 0,
     antialias: RENDER.antialias,
     autoDensity: true,
@@ -130,8 +149,22 @@ export async function getStageApp(): Promise<StageAppHandle> {
   const layout: StageLayout = { scale: 1, x: 0, y: 0, width: 1, height: 1 };
   const layoutListeners = new Set<(value: StageLayout) => void>();
 
-  /* --- Eine Uhr: PIXI treibt GSAP --- */
-  gsap.ticker.remove(gsap.updateRoot);
+  /*
+   * --- Eine Uhr: PIXI treibt GSAP ---
+   *
+   * Uebernommen wird sie erst beim **Anhaengen**, nicht schon beim Bauen der App. Mit
+   * dem Vorlauf liegen zwischen beidem zehn Sekunden Verhandlung, und in dieser Zeit
+   * stuende GSAPs Wurzel-Zeitleiste still, waehrend die Runde ihre Tweens anlegt —
+   * eine angehaltene Uhr, an der schon Termine haengen. Beim ersten Frame holte PixiJS
+   * das nach und riss der Show die Container unter den Fuessen weg
+   * (`updateRenderable`, ADR-40/41).
+   */
+  let clockOwned = false;
+  const ownClock = (): void => {
+    if (clockOwned) return;
+    clockOwned = true;
+    gsap.ticker.remove(gsap.updateRoot);
+  };
   let elapsed = 0;
 
   /* --- Frame-Zeiten fuer Dev-Panel und Low-Effects-Erkennung --- */
@@ -228,6 +261,7 @@ export async function getStageApp(): Promise<StageAppHandle> {
     },
 
     attach(target) {
+      ownClock();
       host = target;
       target.append(app.canvas);
       observer?.disconnect();
@@ -263,10 +297,65 @@ export async function getStageApp(): Promise<StageAppHandle> {
       observer?.disconnect();
       app.destroy(true, { children: true });
       handle = undefined;
+      pending = undefined;
     },
   };
 
   return handle;
+}
+
+let warmed = false;
+
+/**
+ * Legt den Renderer schon **vor** der Aufdeckung an — der Grund fuer den Ruckler
+ * (ADR-40/41).
+ *
+ * `Application.init()` erzeugt den WebGL-Kontext und uebersetzt die Shader: auf einem
+ * Mittelklasse-Handy rund 280 ms in einem einzigen Frame. Waehrend der Verhandlung faellt
+ * das niemandem auf — im ersten Moment der Aufdeckung schon, denn dort liegt es genau
+ * zwischen "Tresor oeffnen" und der ersten Karte.
+ *
+ * **Nur ueber `loadStageModules()` aufrufen.** Der Renderer bindet seine Render-Pipes an
+ * die Module, die beim Anlegen geladen waren; wer ihn zu frueh baut, bekommt ihn ohne die
+ * Pipes der Show. Warum das so ist und was es gekostet hat, steht in `stageModules.ts`.
+ *
+ * Gewaermt wird an einem **Wegwerf-Objekt**, nicht an `app.stage`: Deren erster
+ * gerenderter Frame soll weiterhin der erste Frame der Aufdeckung sein. Darauf liegt je
+ * eine Flaeche und ein Sprite aus jedem Atlas — die Flaeche uebersetzt die
+ * Graphics-Shader, die Sprites die Batch-Shader, und nebenbei wandern die drei
+ * Atlas-Texturen jetzt hier auf die GPU statt beim ersten Kartenflip. Das Canvas haengt
+ * dabei nicht im DOM; gezeichnet wird trotzdem, und niemand sieht ein Standbild
+ * aufblitzen.
+ */
+export async function warmStageApp(): Promise<void> {
+  if (warmed) return;
+  warmed = true;
+
+  let stage: StageAppHandle;
+  let assets: StageAssets;
+  try {
+    // Der Aufrufer hat beides schon angestossen; hier warten wir nur auf dieselbe Promise.
+    [stage, assets] = await Promise.all([getStageApp(), loadStageAssets()]);
+  } catch (error) {
+    warmed = false;
+    throw error;
+  }
+
+  const probe = new Container();
+  probe.addChild(new Graphics().rect(0, 0, 8, 8).fill(0xffffff));
+  for (const sheet of [assets.back, assets.crooks, assets.front]) {
+    const texture = Object.values(sheet.textures)[0];
+    if (texture) probe.addChild(new Sprite(texture));
+  }
+
+  try {
+    for (let frame = 0; frame < RENDER.warmupFrames; frame++) {
+      stage.app.renderer.render({ container: probe });
+    }
+  } finally {
+    // Ohne `texture: true` — die Atlas-Texturen bleiben, sie werden gleich gebraucht.
+    probe.destroy({ children: true });
+  }
 }
 
 /** Aktuelle Welt-Transformation — Testwerkzeuge leiten daraus Bildausschnitte ab. */
@@ -288,8 +377,10 @@ export function stageDrawCalls(): number {
 export function resetStageApp(): void {
   handle?.destroy();
   handle = undefined;
+  pending = undefined;
   assetsPromise = undefined;
   assetsReady = false;
+  warmed = false;
 }
 
 /**

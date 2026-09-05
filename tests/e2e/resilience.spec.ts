@@ -13,6 +13,7 @@
 
 import { expect, test } from '@playwright/test';
 import {
+  AFTER_SHOW_MS,
   atScreen,
   openVault,
   playChoices,
@@ -21,6 +22,7 @@ import {
   setPlayerCount,
   skipNegotiation,
   startGame,
+  waitForRevealed,
 } from './helpers';
 
 test.describe('Fehlerfaelle', () => {
@@ -75,16 +77,9 @@ test.describe('Fehlerfaelle', () => {
      * DOM-Reihe aufgedeckt, das Protokoll fuellt sich wie immer, und der Screen geht
      * danach weiter. Wer bis hierhin gespielt hat, will ein Ergebnis, keinen Fehler.
      */
-    await page.waitForFunction(
-      () => {
-        const el = document.querySelector('.screen--reveal') as HTMLElement | null;
-        return !!el && (el.dataset['revealed'] ?? '').split(',').filter(Boolean).length === 3;
-      },
-      undefined,
-      { timeout: 60_000 }
-    );
+    await waitForRevealed(page, 3);
 
-    await atScreen(page, 'distribute', 60_000);
+    await atScreen(page, 'distribute', AFTER_SHOW_MS);
     expect(problems).toEqual([]);
   });
 

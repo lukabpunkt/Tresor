@@ -32,7 +32,7 @@ const BUDGET = { p50: 16.7, p95: 33 } as const;
  * gedrosselten Kern. Der Wert deckelt einen **bekannten** Aussetzer, damit er nicht
  * unbemerkt waechst; er behauptet nicht, dass es keinen gaebe.
  */
-const FRAME_LIMITS = { maxMs: 400, overBudget: 33, maxOverBudget: 6 } as const;
+const FRAME_LIMITS = { maxMs: 300, overBudget: 33, maxOverBudget: 4 } as const;
 /** Audit A2: eine Textur je Ebene, also drei Wechsel pro Frame (ADR-14). */
 const MAX_DRAW_CALLS = 3;
 
@@ -256,16 +256,22 @@ test.describe('Gedrosselt', () => {
   /**
    * Dasselbe noch einmal, aber mit **vierfach gedrosselter CPU**.
    *
-   * Ohne Drosselung liegt der schlechteste Frame bei 50 ms und man sieht nichts. Auf
-   * einem echten Handy ruckt es beim Aufdecken sichtbar — gemeldet aus dem Spiel, nicht
-   * aus dem Test. Gedrosselt ist der Grund messbar: PixiJS legt beim Betreten der
-   * Aufdeckung den WebGL-Kontext an und uebersetzt die Shader, rund 280 ms in einem
-   * einzigen Frame.
+   * Ohne Drosselung sieht man nichts; auf einem echten Handy ruckte es beim Aufdecken
+   * sichtbar — gemeldet aus dem Spiel, nicht aus dem Test. Gedrosselt war der Grund
+   * messbar: PixiJS legte beim Betreten der Aufdeckung den WebGL-Kontext an und
+   * uebersetzte die Shader.
    *
-   * Der Test behauptet nicht, dass das behoben sei (ADR-40 beschreibt, warum ein Vorlauf
-   * waehrend der Verhandlung PixiJS zerlegt). Er haelt fest, **wie schlimm** es ist —
-   * damit es nicht unbemerkt schlimmer wird und damit ein Versuch, es zu beheben,
-   * nachweisen kann, dass er wirkt.
+   * Seit ADR-41 passiert das waehrend der Verhandlung. Gegen denselben Ablauf, nur mit
+   * abgeschaltetem Vorlauf gemessen, sind es zwei Messreihen:
+   *
+   * | | ohne Vorlauf | mit Vorlauf |
+   * |---|---|---|
+   * | schlechtester Frame | 133 ms · 116 ms | 67 ms · 84 ms |
+   * | Frames ueber 33 ms | 4 · 4 | 1 · 1 |
+   *
+   * Die Grenzen hier sind bewusst weiter als die gemessenen Werte: Auf einer belasteten
+   * Maschine schwankte derselbe Code zwischen 67 und 183 ms. Der Test sichert die
+   * Groessenordnung gegen einen Rueckfall — er misst nicht das Rauschen.
    */
   test('haelt den Aussetzer beim Buehnen-Aufbau in Grenzen', async ({ page, browserName }) => {
     test.skip(browserName !== 'chromium', 'CPU-Drosselung gibt es nur ueber das CDP.');
@@ -275,6 +281,8 @@ test.describe('Gedrosselt', () => {
     const confirm = page.getByRole('button', { name: 'Los' });
     if (await confirm.isVisible().catch(() => false)) await confirm.click();
     await atScreen(page, 'lobby');
+
+    const software = await isSoftwareRenderer(page);
 
     await setPlayerCount(page, 4);
     await openVault(page);
@@ -317,6 +325,15 @@ test.describe('Gedrosselt', () => {
         `${overBudget.length} ueber ${FRAME_LIMITS.overBudget} ms`
     );
 
+    /*
+     * Wie in den beiden Faellen darueber: Gemessen und gemeldet wird immer, geprueft nur
+     * auf echter Grafik. Der CI-Runner zeichnet in Software mit 10 fps — dort liegt
+     * **jeder** Frame ueber dem Budget, egal was das Spiel tut (gemessen: 314 von 352).
+     * Eine Zusicherung darauf misst den Mietrechner, nicht die Aufdeckung. Dass dieser
+     * Fall das als einziger vergass, fiel nie auf: Die Perf-Stufe lief auf CI nie, weil
+     * der E2E-Flow davor abbrach.
+     */
+    test.skip(software, 'Software-Renderer: Frame-Zeiten sagen nichts ueber das Spiel aus.');
     expect(worst, `schlechtester Frame ${worst.toFixed(0)} ms`).toBeLessThanOrEqual(FRAME_LIMITS.maxMs);
     expect(overBudget.length).toBeLessThanOrEqual(FRAME_LIMITS.maxOverBudget);
   });

@@ -33,7 +33,7 @@
 | Desktop zeigt Portrait-Frame | ✅ | Screenshot `docs/screens/m0-desktop.png`: 9:16-Rahmen, max. 480 px, 32 px Radius, Gold-/Samt-Hintergrund. |
 | E2E: App startet ohne Console-Fehler, keine externen Requests | ✅ | `tests/e2e/flow.spec.ts`, 4 Szenarien × iPhone 12 (WebKit) und Pixel 5 (Chromium): Titel sichtbar, Tresorstand 4, null Console-Errors, null Requests außerhalb von localhost/data:/blob: (Architektur §9), Landscape-Overlay erscheint im Querformat. |
 | App auf Handy im WLAN erreichbar (`--host`), Titel sichtbar | ⏳ manuell | `npm run dev` bindet über `server.host: true` auf alle Interfaces und gibt eine Network-URL aus. Gegen den Preview-Build mit iPhone-12- und Pixel-5-Emulation geprüft — der Test auf einem echten Gerät fehlt. |
-| CI läuft grün auf GitHub | ⏳ manuell | `ci.yml` und `deploy.yml` liegen vor und bilden lokal grüne Schritte ab (typecheck, lint, coverage, build, Bundle-Budget, E2E, perf). Das Repo ist lokal initialisiert, aber noch nicht gepusht — der erste CI-Lauf steht aus. |
+| CI läuft grün auf GitHub | ✅ | Repo gepusht, beide Workflows laufen. Der Deploy war immer grün, die CI-Stufe **nicht**: Sie fiel seit mehreren Commits an drei Befunden, die alle nichts mit dem Spiel zu tun hatten (Abschnitt *CI war rot*). Seit Lauf `33969705153` grün: Qualitätsstufe, 108 E2E-Fälle, Perf-Stufe. |
 
 **Offene SOLL-Follow-ups:** keine.
 
@@ -485,3 +485,74 @@ Die Einzeiler in der Lobby bleiben: Sie reichen zum Wählen. Wer es genau wissen
 **Was den Text ehrlich hält:** Ein Test prüft für **beide** Sprachen, dass jeder Modus aus `MODE_IDS` einen Titel, mindestens zwei Zeilen und eine Fußnote hat. Wer einen sechsten Modus ergänzt und die Anleitung vergisst, fällt hier auf — und nicht am Tisch.
 
 **Zahlen:** 758 Unit-Tests (2 neu für die Vollständigkeit) · 4 neue E2E-Fälle · 5 erklärte Modi in DE und EN.
+
+
+## Der Ruckler beim Aufdecken ist behoben — ADR-40 lag falsch — 2026-09-05
+
+ADR-40 hatte den Aussetzer gemessen, den Fix zurückgenommen und zwei Vermutungen hinterlassen, warum ein Vorlauf während der Verhandlung PixiJS zerlegt. **Beide waren falsch.** Der Fehler `Cannot read properties of undefined (reading 'updateRenderable')` liest sich wie ein Lebenszyklus-Problem und ist in Wahrheit eine Reihenfolge im Chunk-Splitting.
+
+**Was wirklich passiert.** PixiJS baut `renderer.renderPipes` in dem Moment, in dem der Renderer entsteht, aus den bis dahin registrierten Erweiterungen — und jede Zeichen-Klasse registriert ihre Pipe beim Auswerten ihres Moduls. Der alte Vorlauf lud nur `StageApp` und legte den Renderer an. Alles, was die Show darüber hinaus zeichnet (`VaultRoom`, `RevealDirector`, die zwanzig Inszenierungen), kam erst beim Betreten der Aufdeckung — und deren Pipes fehlten diesem Renderer für immer. Der erste Frame der Show greift dann in `renderPipes[renderPipeId]` und findet `undefined`.
+
+**Wie es gefunden wurde: durch Ausschluss, nicht durch Nachdenken.** Jede Vermutung einzeln gefahren, jede widerlegt — das Rendern der echten Bühne (ein Vorlauf ganz ohne Frame starb genauso), der mitlaufende Ticker (`autoStart: false` änderte nichts), die GSAP-Uhr (Übernahme erst beim Anhängen änderte nichts). Erst ein unminifizierter Build machte den Stack lesbar, und dort stand nicht die vermutete zerstörte Render-Gruppe, sondern eine fehlende Pipe. Die beiden ADR-40-Vorschläge hätten beide nicht funktioniert.
+
+**Was jetzt steht**
+
+- `src/game/stageModules.ts` — **eine** Liste der Bühnen-Module. Vorlauf, `RevealScreen` und die Outcome-Vorschau ziehen dieselbe; vorher führten alle drei ihre eigene.
+- Der Vorlauf arbeitet in drei Schritten, und die Reihenfolge ist bindend: erst alle Zeichen-Module, dann die Atlanten, dann der Renderer. Gewärmt wird an einem Wegwerf-Objekt außerhalb der Bühne — eine Fläche für die Graphics-Shader, je ein Sprite pro Atlas für die Batch-Shader. Nebenbei wandern damit auch die drei Atlas-Texturen in der Verhandlung auf die GPU.
+- `getStageApp()` sperrt auf der **Promise** statt auf dem fertigen Handle. Ohne das legen Vorlauf und Aufdeckung in den 280 ms von `init()` zwei WebGL-Kontexte an, deren Ticker beide GSAPs Wurzel-Zeitleiste mit eigener Zeit füttern.
+- `autoStart: false` und die Übernahme der GSAP-Uhr beim `attach()` stammen aus der Suche und bleiben. Sie haben den Absturz nicht behoben, bekommen aber mit einem früh angelegten Renderer erst Gewicht: Sonst zeichnet die App ab ihrer Entstehung jeden Frame eine leere Bühne, und GSAPs Uhr steht ab der Verhandlung still, während die Runde schon Tweens anlegt.
+
+**Was die Messung sagt.** Zeitmarken gegen denselben Ablauf mit abgeschaltetem Vorlauf, vierfach gedrosselte CPU, zwei Paare:
+
+| | ohne Vorlauf | mit Vorlauf |
+|---|---|---|
+| `Application.init()` | 11 219 ms — 123 ms nach Aufbaubeginn, mitten in der Aufdeckung | 1 413 ms — in der Verhandlung |
+| schlechtester Frame | 133 ms · 116 ms | 67 ms · 84 ms |
+| Frames über 33 ms | 4 · 4 | 1 · 1 |
+
+Der Rest ist die Shader-Übersetzung des ersten echten Bildes, direkt nach dem Anhängen. Dagegen hilft kein Vorlauf mehr, der die Bühne nicht anfassen darf — und anfassen darf er sie nicht, denn ihr erster gerenderter Frame soll der erste Frame der Show bleiben.
+
+**Eine Lehre zur Methode, die teurer war als der Fix:** Absolute Frame-Zahlen sind auf einer belasteten Maschine wertlos. Derselbe Code lieferte 67, 84 und 183 ms. Der erste Vergleich gegen die in M6 notierte Zahl legte deshalb sogar eine *Verschlechterung* nahe. Erst Zeitmarken im Ablauf und paarweise Läufe auf derselben Maschine machten den Unterschied belastbar.
+
+**Was das festhält:** `tests/unit/boundaries.test.ts` lässt nur noch `stageModules.ts` Bühnen-Module nachladen. Wer künftig eines nur in der Aufdeckung ergänzt, bekommt keinen Tippfehler, sondern einen toten Reveal — und fällt hier auf, nicht am Tisch. Die Grenzen in `perf.spec.ts` gehen von 400 ms / 6 Frames auf 300 ms / 4 Frames; bewusst weiter als die gemessenen Werte, weil der Test die Größenordnung sichern soll und nicht das Rauschen.
+
+**Zahlen:** 762 Unit-Tests (2 neu) · gedrosselt schlechtester Frame 65 ms · ungedrosselt 19 ms und kein Frame über Budget · `Application.init()` 9,8 s früher · Einstiegs-Bundle 37,9 KB (Budget 40).
+
+
+## CI war rot — ein Rennen im Test, kein Fehler im Spiel — 2026-09-05
+
+Der erste Blick auf GitHub nach dem Push: **CI ist rot**, und war es schon vor dieser Arbeit. Der Deploy lief, die Qualitaets-Stufe lief, aber die E2E-Stufe fiel — seit mehreren Commits, an genau einem Test: „lässt die letzte Karte nicht wegtippen" (GDD §4.3), auf allen drei Versuchen, nie lokal.
+
+**Was der Artefakt-Bericht zeigte.** Die Seite stand beim Fehlschlag längst auf dem Ergebnis-Screen („Zu viele Köche", „Nächste Runde"). Der Test wartete darauf, dass `data-revealed` vier Karten meldet — dieses Attribut lebt aber auf dem Reveal-Screen, und der ist nach der Show samt Protokoll ausgetauscht. Wer danach fragt, bekommt einen leeren String, der nie mehr voll wird.
+
+**Warum ausgerechnet auf CI.** Der Test tippt zwanzig Mal auf die letzte Karte, um zu beweisen, dass sie sich nicht vorziehen lässt. Jeder dieser Taps ist ein Playwright-Aufruf mit Netzwerk-Umlauf; auf einem GitHub-Runner dauern zwanzig davon lange genug, dass die Show währenddessen zu Ende läuft. Lokal gewann derselbe Test das Rennen und sah gesund aus. Die Bildrate spielt dabei keine Rolle — der PIXI-Ticker treibt GSAP mit echter Zeit, die Show dauert auf einem langsamen Rechner also **gleich lang**, nur die Testschritte dauern länger.
+
+**Der Fix ist ein Mitschreiber, kein längeres Timeout.** `watchRevealLog()` hängt beim Betreten der Aufdeckung einen `MutationObserver` an den `<body>` und behält den längsten gesehenen Stand. Damit hängt die Zusicherung am **Inhalt**, nicht am Zeitpunkt der Frage — dieselbe Regel, die der Helfer-Kopf seit M1 aufstellt („Wartebedingungen hängen an Zuständen, nie an Uhrzeiten"), nur eine Ebene tiefer: Der Zustand muss den Screen überleben, an dem er hängt.
+
+Belegt lokal, indem die CI-Bedingung erzwungen wurde: zwanzig Sekunden Wartezeit nach den Taps, also weit jenseits des Screen-Wechsels. Vorher unmöglich zu bestehen, jetzt grün.
+
+**Mitgenommen:** Zwei weitere Stellen hatten dasselbe Rennen, nur unauffällig — „deckt Teiler zuerst und Diebe zuletzt auf" (wartet sofort nach dem Betreten und gewann deshalb immer) und der Atlas-Ausfall in `resilience.spec.ts` (wartet auf die dritte von drei Karten, also die letzte). Beide lesen jetzt aus dem Mitschreiber.
+
+**Nachtrag: Der erste PR-Lauf hat einen zweiten roten Test freigelegt.** Der Flow-Fix wirkte — die E2E-Stufe kam durch —, und genau dadurch lief die **Perf-Stufe zum ersten Mal ueberhaupt auf CI**. Bis dahin brach der Flow davor immer ab, und `dee5051` hatte den gedrosselten Fall zwar eingefuehrt, aber nie dort laufen sehen.
+
+Was er dort meldete: Der GitHub-Runner zeichnet Chromium **in Software mit 10 fps**. Im ungedrosselten Reveal-Fall liegen 314 von 352 Frames ueber dem 33-ms-Budget, im gedrosselten 42 von 72. Das ist keine Aussage ueber das Spiel, sondern ueber den Mietrechner — und auch der urspruengliche Grenzwert von sechs Frames waere dort gefallen, nicht erst der auf vier verschaerfte.
+
+Die beiden Perf-Faelle darueber haben dafuer laengst eine Weiche: messen und melden immer, pruefen nur auf echter Grafik (`test.skip(software, ...)`). Der gedrosselte Fall hatte sie als einziger nicht. Jetzt hat er sie. Auf echter Grafik bleibt alles scharf — schlechtester Frame 99 ms bei Grenze 300, drei Frames ueber Budget bei Grenze vier.
+
+**Nebenbei:** GitHub meldet in jedem Lauf, dass `checkout@v4`, `setup-node@v4`, `upload-artifact@v4` und `configure-pages@v5` auf abgekuendigtem Node 20 laufen und nur notgedrungen auf Node 24 gestartet werden — heute eine Warnung, spaeter ein roter Lauf. Alle sechs Actions stehen jetzt auf ihrem Node-24-Major. Die drei Pages-Actions kann nur ein Push auf `main` beweisen; faellt der Deploy, bleibt die bisher veroeffentlichte Seite live.
+
+**Nachtrag 2: Warum die Show auf CI ueberhaupt in Zeitfenster laeuft.** Der zweite PR-Lauf kam durch die Perf-Stufe und fiel dafuer an drei Flow-Tests, die alle dasselbe warteten: einen Screen **hinter** der Show, mit 40 Sekunden Geduld. Die Ursache steht in einer Zahl aus dem Perf-Log: Das Dev-Panel meldet auf dem Runner exakt `p50 100,0 ms` — das ist nicht gemessen, das ist PixiJS' `maxElapsedMS`-Deckel. Rohe Frames brauchen dort bis zu 150 ms.
+
+Der Ticker treibt GSAP. Wo ein Frame laenger als 100 ms braucht, bekommt die Show weniger Zeit gutgeschrieben, als real vergeht — **sie zieht sich in Wanduhr-Zeit**. Auf dem Software-Renderer um rund die Haelfte: Aus zwanzig Sekunden Show werden ueber dreissig. Die 40-Sekunden-Fenster dahinter waren damit auf Kante genaeht, und ein etwas langsamerer Runner kippte sie.
+
+Wartebedingungen, die ein Stueck Show ueberspannen, haben jetzt ihr eigenes Fenster (`AFTER_SHOW_MS`, 90 s) mit der Begruendung im Code. Gewartet wird weiter auf einen **Zustand** — nur laenger, wenn die Maschine langsam zeichnet. Dieselbe Rechnung trifft das Test-Timeout: Drei Runden mit je einer um die Haelfte gedehnten Show passen nicht in zwei Minuten, also stehen dort jetzt fuenf.
+
+Zwei Stellen waren dabei leicht zu uebersehen. `distributeAllToFirst()` wartet auf den Verteil-Screen — im Helfer, nicht an der Aufrufstelle —, und dieser Screen kommt immer direkt hinter einer Show. Und die zwanzig Taps auf die letzte Karte zielten auf den jeweils **aktuellen** Screen: Laeuft die Show waehrend der Taps durch, landen die restlichen auf dem Ergebnis, wo einer davon "Naechste Runde" trifft. Sie zielen jetzt auf die Buehne und hoeren auf, sobald sie nicht mehr steht.
+
+**Das ist nicht nur eine Test-Eigenschaft.** Faellt ein echtes Geraet unter 10 fps, zieht sich die Show dort genauso. Die Gegenmassnahme dafuer steht seit M5: Low-Effects greift ab einem Frame-Median von 22 ms und nimmt Laser, Schatten und Vignette heraus, bevor es so weit kommt.
+
+**Ergebnis:** Lauf `33969705153` ist grün — Qualitaetsstufe, 108 E2E-Faelle, Perf-Stufe (ein geprueft, drei auf dem Software-Renderer uebersprungen). Damit ist der seit M0 offene Punkt *CI laeuft gruen auf GitHub* geschlossen, und die Node-20-Abkuendigung ist aus den Laeufen verschwunden.
+
+**Was das ueber die Test-Suite sagt.** Keiner der vier Befunde war ein Fehler im Spiel — und keiner waere lokal je aufgefallen. Drei davon haben denselben Kern: Der Test nimmt an, die Maschine sei so schnell wie die eigene. Der vierte war eine Weiche, die zwei von drei Faellen hatten. Dass die Perf-Stufe dabei **zum ersten Mal ueberhaupt** auf CI lief, ist der eigentliche Befund: Ein roter Test davor verdeckt alles dahinter, und niemand sieht, was nie gelaufen ist.
+
+**Zahlen:** 4 rote CI-Befunde (ein Rennen, eine fehlende Weiche, ein zu enges Zeitfenster, eine verdeckte Wartestelle) · 14 Wartestellen umgestellt · 6 Actions auf Node-24-Majors · 108 E2E-Faelle auf CI gruen · 0 Produktionscode geaendert.

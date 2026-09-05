@@ -23,10 +23,17 @@ export default defineConfig({
   expect: { timeout: 10_000 },
   /*
    * Playwrights Standard von 30 s reicht hier nicht: Ein Test, der drei komplette Runden
-   * spielt, deckt allein 12 Karten in Echtzeit auf. Zwei Minuten sind immer noch kurz
-   * genug, um einen echten Haenger zu finden.
+   * spielt, deckt allein 12 Karten in Echtzeit auf.
+   *
+   * Fuenf Minuten statt zwei, weil die Show nicht ueberall gleich lang dauert: PixiJS
+   * deckelt `ticker.deltaMS` bei `maxElapsedMS` = 100 ms, und der Ticker treibt GSAP.
+   * Wo ein Frame laenger braucht, bekommt die Show weniger Zeit gutgeschrieben, als real
+   * vergeht — auf dem CI-Runner, der in Software zeichnet, dauert sie rund die Haelfte
+   * laenger (siehe `AFTER_SHOW_MS` in `helpers.ts`). Drei Runden passten dort nicht mehr
+   * in zwei Minuten. Fuenf sind immer noch kurz genug, um einen echten Haenger zu finden:
+   * Der langsamste Testlauf hier braucht sieben Minuten fuer **dreiundzwanzig** Faelle.
    */
-  timeout: 120_000,
+  timeout: 300_000,
   reporter: process.env.CI ? [['github'], ['html', { open: 'never' }]] : [['list']],
   use: {
     baseURL: 'http://localhost:4173/Tresor/',

@@ -18,7 +18,7 @@
  * sollte.
  */
 
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { PLAYER_COLORS, UI_COLORS } from '@/config/theme';
@@ -148,6 +148,65 @@ describe('Infrastruktur kennt das Spiel nicht', () => {
     // Ein Pfad, der umbenannt wird, darf nicht still aus der Prüfung fallen.
     for (const path of [...STANDALONE, ...CONFIG_ONLY]) {
       expect(() => read(path), `${path} existiert nicht mehr`).not.toThrow();
+    }
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* 3. Eine Liste der Bühnen-Module                                     */
+/* ------------------------------------------------------------------ */
+
+/**
+ * PixiJS bindet seine Render-Pipes an den Renderer, sobald dieser entsteht: Jede
+ * Zeichen-Klasse registriert ihre Pipe beim Auswerten ihres Moduls, und was danach
+ * geladen wird, fehlt diesem Renderer für immer. Seit dem Vorlauf (ADR-41) entsteht der
+ * Renderer schon während der Verhandlung — also muss dort **dieselbe** Modulmenge
+ * geladen sein wie später in der Aufdeckung.
+ *
+ * Zwei Listen wären hier kein Tippfehler-Risiko, sondern ein toter Reveal: Wer ein Modul
+ * nur in der Aufdeckung nachlädt, bekommt einen Renderer ohne dessen Pipe, und die Show
+ * stirbt im ersten Frame mit `renderPipes[renderPipeId]` = `undefined` — ein Fehler, der
+ * nach PixiJS aussieht und in Wahrheit eine Reihenfolge im Chunk-Splitting ist. Genau das
+ * hat ADR-40 gekostet.
+ *
+ * Deshalb ist `stageModules.ts` die einzige Stelle, die Bühnen-Module nachlädt.
+ */
+describe('Bühnen-Module werden an einer Stelle geladen', () => {
+  const LOADER = 'src/game/stageModules.ts';
+
+  /** Alle `.ts` unterhalb eines Verzeichnisses, rekursiv. */
+  const sources = (dir: string): string[] =>
+    readdirSync(join(root, dir)).flatMap((entry) => {
+      const path = `${dir}/${entry}`;
+      if (statSync(join(root, path)).isDirectory()) return sources(path);
+      return path.endsWith('.ts') ? [path] : [];
+    });
+
+  it('nur der Loader lädt sie nach', () => {
+    /*
+     * Erlaubt bleibt genau ein dynamischer Import: der auf den Loader selbst. Er hält
+     * den Bühnen-Chunk aus dem Einstiegs-Bundle heraus (ADR-15) — die Screens dürfen ihn
+     * anstoßen, nur eben nicht an ihm vorbei.
+     */
+    /** Zielt der Import in `src/game/`? Auch als relativer Pfad von dort aus. */
+    const intoStage = (from: string, id: string): boolean =>
+      id.includes('game/') || (from.startsWith('src/game/') && id.startsWith('.'));
+
+    const offenders = sources('src')
+      .filter((path) => path !== LOADER)
+      .filter((path) =>
+        [...read(path).matchAll(/import\(\s*'([^']+)'/g)].some(
+          (match) => intoStage(path, match[1]!) && !match[1]!.endsWith('/stageModules')
+        )
+      );
+    expect(offenders, 'Bühnen-Modul am Loader vorbei nachgeladen').toEqual([]);
+  });
+
+  it('der Loader zieht alles, was gezeichnet wird', () => {
+    const loader = read(LOADER);
+    // Was `RevealScreen` und die Outcome-Vorschau später aus dem Chunk auspacken.
+    for (const name of ['StageApp', 'VaultRoom', 'Camera', 'RevealDirector', 'registry', 'SipCounter']) {
+      expect(loader, `${name} fehlt im Vorlauf`).toContain(name);
     }
   });
 });

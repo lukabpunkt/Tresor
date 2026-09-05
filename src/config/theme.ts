@@ -229,6 +229,13 @@ export const RENDER = {
   },
   /** Frame-Budget auf dem Referenzgeraet. */
   budgetMs: { update: 4, render: 8 },
+  /**
+   * Wie oft der Vorlauf sein Wegwerf-Objekt rendert, bevor die Aufdeckung kommt
+   * (ADR-41). Der erste Frame legt den WebGL-Kontext an und uebersetzt die Shader, der
+   * zweite laeuft bereits durch die aufgewaermten Pipelines — und belegt damit, dass
+   * genau das passiert ist.
+   */
+  warmupFrames: 2,
 } as const;
 
 /* ------------------------------------------------------------------ */

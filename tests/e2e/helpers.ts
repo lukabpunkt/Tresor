@@ -21,6 +21,22 @@ export type ScreenId =
   | 'distribute'
   | 'result';
 
+/**
+ * Wartezeit fuer alles, was **hinter** der Show liegt.
+ *
+ * Die Aufdeckung dauert nicht ueberall gleich lang. PixiJS deckelt `ticker.deltaMS` bei
+ * `maxElapsedMS` = 100 ms, und der Ticker treibt GSAP: Wo ein Frame laenger als 100 ms
+ * braucht, bekommt die Show weniger Zeit gutgeschrieben, als real vergeht — sie zieht
+ * sich in Wanduhr-Zeit. Auf dem CI-Runner zeichnet Chromium in Software; dort meldet das
+ * Dev-Panel exakt 100,0 ms je Frame (also den Deckel), waehrend rohe Frames bis 150 ms
+ * brauchen. Eine 20-Sekunden-Show dauert dort ueber eine halbe Minute.
+ *
+ * Deshalb bekommen Wartebedingungen, die ein Stueck Show ueberspannen, ihr eigenes
+ * Fenster. Es ersetzt keine Zustandspruefung — gewartet wird weiter auf einen Zustand,
+ * nur eben laenger, wenn die Maschine langsam zeichnet.
+ */
+export const AFTER_SHOW_MS = 90_000;
+
 /** Wartet, bis genau dieser Screen gemountet ist. */
 export async function atScreen(page: Page, id: ScreenId, timeout = 40_000): Promise<void> {
   await page.waitForFunction(
@@ -89,10 +105,63 @@ export async function playChoices(page: Page, choices: readonly ('share' | 'stea
   await atScreen(page, 'sealed');
 }
 
-/** Sealed → Reveal → (Distribute) → Result. */
+/** Sealed → Reveal → (Distribute) → Result. Schreibt dabei das Karten-Protokoll mit. */
 export async function runReveal(page: Page): Promise<void> {
   await page.getByRole('button', { name: 'Tresor öffnen' }).click();
   await atScreen(page, 'reveal');
+  await watchRevealLog(page);
+}
+
+/**
+ * Hält das Karten-Protokoll fest, **solange es existiert**.
+ *
+ * `data-revealed` lebt auf dem Reveal-Screen, und der Screen lebt nur bis zum Ende der
+ * Show: Danach ist er samt Protokoll ausgetauscht. Wer erst nach der letzten Karte danach
+ * fragt, fragt womöglich schon das Ergebnis — und bekommt einen leeren String, der nie
+ * mehr voll wird. Genau daran ist „lässt die letzte Karte nicht wegtippen" auf CI
+ * gescheitert: Die zwanzig Taps dauern dort lange genug, dass die Show währenddessen
+ * durchläuft. Lokal gewann derselbe Test das Rennen und sah gesund aus.
+ *
+ * Ein Beobachter am `<body>` schreibt jede Änderung mit und behält den längsten Stand.
+ * Damit hängt die Zusicherung am Inhalt, nicht am Zeitpunkt der Frage.
+ */
+export async function watchRevealLog(page: Page): Promise<void> {
+  await page.evaluate(() => {
+    const scope = globalThis as unknown as { __revealLog?: string };
+    // Pro Runde neu: Der nächste Reveal fängt wieder bei null Karten an.
+    scope.__revealLog = '';
+    const read = (): void => {
+      const log = document.querySelector<HTMLElement>('.screen--reveal')?.dataset['revealed'] ?? '';
+      if (log.length > (scope.__revealLog ?? '').length) scope.__revealLog = log;
+    };
+    new MutationObserver(read).observe(document.body, {
+      subtree: true,
+      childList: true,
+      attributes: true,
+      attributeFilter: ['data-revealed'],
+    });
+    read();
+  });
+}
+
+/** Die mitgeschriebenen Karten als `playerId:choice`-Liste. */
+export async function revealedCards(page: Page): Promise<string[]> {
+  const log = await page.evaluate(
+    () => (globalThis as unknown as { __revealLog?: string }).__revealLog ?? ''
+  );
+  return log ? log.split(',') : [];
+}
+
+/** Wartet, bis der Mitschreiber `count` Karten gesehen hat. */
+export async function waitForRevealed(page: Page, count: number, timeout = AFTER_SHOW_MS): Promise<void> {
+  await page.waitForFunction(
+    (want) =>
+      ((globalThis as unknown as { __revealLog?: string }).__revealLog ?? '')
+        .split(',')
+        .filter(Boolean).length >= want,
+    count,
+    { timeout }
+  );
 }
 
 /**
@@ -104,7 +173,8 @@ export async function runReveal(page: Page): Promise<void> {
  * Zustand, kein Zeitpunkt.
  */
 export async function distributeAllToFirst(page: Page): Promise<void> {
-  await atScreen(page, 'distribute');
+  // Verteilt wird immer direkt nach der Show — also mit deren Fenster (AFTER_SHOW_MS).
+  await atScreen(page, 'distribute', AFTER_SHOW_MS);
   const payout = page.getByRole('button', { name: 'Auszahlen' });
   const target = page.locator('.distribute__target').first();
   const remaining = page.locator('.distribute__remaining');

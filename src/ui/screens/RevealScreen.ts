@@ -36,6 +36,7 @@ import { acquireWakeLock, releaseWakeLock } from '@/ui/wakeLock';
 import type { Camera } from '@/game/Camera';
 import type { RevealDirector } from '@/game/RevealDirector';
 import type { StageAppHandle } from '@/game/StageApp';
+import { loadStageModules } from '@/game/stageModules';
 import type { VaultRoom } from '@/game/VaultRoom';
 
 /** Nur mit `?dev=1`: Haelt die Show an, damit man die Buehne betrachten kann. */
@@ -121,14 +122,19 @@ export function createRevealScreen(ctx: ScreenContext): ScreenInstance {
   /* ---------------------------------------------------------------- */
 
   async function buildStage(): Promise<void> {
-    // Ein einziger Lazy-Chunk: Die Module haengen ohnehin aneinander.
-    const [stageApp, roomModule, cameraModule, directorModule, registry] = await Promise.all([
-      import('@/game/StageApp'),
-      import('@/game/VaultRoom'),
-      import('@/game/Camera'),
-      import('@/game/RevealDirector'),
-      import('@/game/outcomes/registry'),
-    ]);
+    /*
+     * Ein einziger Lazy-Chunk, geladen ueber `loadStageModules()` — dieselbe Liste, die
+     * der Vorlauf waehrend der Verhandlung benutzt. Sie hier ein zweites Mal zu fuehren
+     * waere kein Tippfehler-Risiko, sondern ein toter Reveal: Der Renderer bindet seine
+     * Render-Pipes an die Module, die beim Anlegen geladen waren (ADR-41).
+     */
+    const {
+      stageApp,
+      room: roomModule,
+      camera: cameraModule,
+      director: directorModule,
+      registry,
+    } = await loadStageModules();
     if (destroyed) return;
 
     registry.registerAll();
